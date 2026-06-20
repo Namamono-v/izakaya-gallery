@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>居酒屋「なまいっちょう」 写真アップロード</title>
+<style>
+  :root { --bg:#1a1410; --card:#2a201a; --accent:#e8a35c; --text:#f3e8d2; --muted:#b9a88f; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+         background:var(--bg); color:var(--text); display:flex; min-height:100vh; align-items:center; justify-content:center; padding:16px; }
+  .card { background:var(--card); border-radius:16px; padding:24px; max-width:460px; width:100%;
+          box-shadow:0 10px 40px rgba(0,0,0,.5); }
+  h1 { font-size:1.25rem; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 20px; font-size:.9rem; line-height:1.5; }
+  .drop { border:2px dashed #5a4a3a; border-radius:12px; padding:28px 16px; text-align:center; cursor:pointer;
+          transition:.15s; color:var(--muted); }
+  .drop:hover, .drop.over { border-color:var(--accent); color:var(--text); background:rgba(232,163,92,.06); }
+  #preview { max-width:100%; max-height:260px; border-radius:10px; margin-top:16px; display:none; }
+  .row { display:flex; gap:10px; align-items:center; margin-top:14px; }
+  input[type=text] { flex:1; padding:10px 12px; border-radius:8px; border:1px solid #5a4a3a; background:#1f1813; color:var(--text); }
+  button { background:var(--accent); color:#2a1a08; border:0; border-radius:10px; padding:13px 18px; font-weight:700;
+           font-size:1rem; cursor:pointer; width:100%; margin-top:16px; }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { margin-top:14px; font-size:.9rem; min-height:1.2em; line-height:1.5; }
+  .ok { color:#8fe08f; } .err { color:#ff9b9b; } .busy { color:var(--accent); }
+  .hint { color:var(--muted); font-size:.78rem; margin-top:18px; line-height:1.5; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>📷 居酒屋「なまいっちょう」</h1>
+    <p class="sub">この居酒屋で撮った写真をアップすると、ワールドの壁に飾られます。<br>選んで「アップロード」を押すだけ。</p>
+
+    <label class="drop" id="drop">
+      ここをタップして写真を選ぶ<br>（ドラッグ＆ドロップもOK）
+      <input type="file" id="file" accept="image/*" hidden>
+    </label>
+    <img id="preview" alt="preview">
+
+    <div class="row">
+      <input type="text" id="caption" maxlength="40" placeholder="ひとことキャプション（任意）">
+    </div>
+
+    <button id="send" disabled>アップロード</button>
+    <div id="status"></div>
+
+    <p class="hint">※ 自動で長辺1280pxに縮小して送ります。数十秒〜1分ほどで世界に反映されます。<br>
+       連続投稿は少し間隔をあけてください。</p>
+  </div>
+
+<script>
+// ===== 設定：Cloudflare Worker をデプロイしたらこのURLに差し替える =====
+const WORKER_URL = "https://izakaya-upload.namamono-pc.workers.dev";
+// =====================================================================
+
+const fileInput = document.getElementById('file');
+const drop = document.getElementById('drop');
+const preview = document.getElementById('preview');
+const sendBtn = document.getElementById('send');
+const statusEl = document.getElementById('status');
+const captionEl = document.getElementById('caption');
+let currentFile = null;
+
+function setStatus(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || ''; }
+
+drop.addEventListener('click', () => fileInput.click());
+['dragover','dragenter'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', ev => { if (ev.dataTransfer.files[0]) pickFile(ev.dataTransfer.files[0]); });
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) pickFile(fileInput.files[0]); });
+
+function pickFile(f) {
+  if (!f.type.startsWith('image/')) { setStatus('画像ファイルを選んでください', 'err'); return; }
+  currentFile = f;
+  preview.src = URL.createObjectURL(f);
+  preview.style.display = 'block';
+  sendBtn.disabled = false;
+  setStatus('');
+}
+
+// EXIF回転を尊重して長辺1280pxのJPEGに縮小
+async function resizeToJpeg(file, maxEdge = 1280, quality = 0.85) {
+  let bitmap;
+  try { bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+  catch (e) { bitmap = await createImageBitmap(file); }
+  let { width: w, height: h } = bitmap;
+  const scale = Math.min(1, maxEdge / Math.max(w, h));
+  const cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = cw; canvas.height = ch;
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, cw, ch);
+  return await new Promise(res => canvas.toBlob(res, 'image/jpeg', quality));
+}
+
+sendBtn.addEventListener('click', async () => {
+  if (!currentFile) return;
+  if (WORKER_URL.includes('REPLACE-WITH')) { setStatus('WORKER_URL が未設定です（管理者へ）', 'err'); return; }
+  sendBtn.disabled = true;
+  setStatus('縮小中…', 'busy');
+  try {
+    const blob = await resizeToJpeg(currentFile);
+    setStatus('アップロード中…', 'busy');
+    const cap = encodeURIComponent(captionEl.value.trim().slice(0, 40));
+    const res = await fetch(WORKER_URL + '?caption=' + cap, {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/jpeg' },
+      body: blob
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      setStatus('✅ アップロード完了！数十秒〜1分で居酒屋に飾られます（' + (data.index + 1) + '枚目）', 'ok');
+      preview.style.display = 'none'; currentFile = null; captionEl.value = '';
+    } else {
+      setStatus('⚠ ' + (data.error || ('失敗しました (' + res.status + ')')), 'err');
+      sendBtn.disabled = false;
+    }
+  } catch (e) {
+    setStatus('⚠ エラー: ' + e.message, 'err');
+    sendBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
